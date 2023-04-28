@@ -212,6 +212,7 @@ void state_t::reset(processor_t* const proc, reg_t max_isa)
   csrmap[CSR_MSCRATCH] = std::make_shared<basic_csr_t>(proc, CSR_MSCRATCH, 0);
   csrmap[CSR_MTVEC] = mtvec = std::make_shared<tvec_csr_t>(proc, CSR_MTVEC);
   csrmap[CSR_MCAUSE] = mcause = std::make_shared<cause_csr_t>(proc, CSR_MCAUSE);
+  mkeyxor = std::make_shared<cause_csr_t>(proc, CSR_MKEYXOR);
   minstret = std::make_shared<wide_counter_csr_t>(proc, CSR_MINSTRET);
   mcycle = std::make_shared<wide_counter_csr_t>(proc, CSR_MCYCLE);
   time = std::make_shared<time_counter_csr_t>(proc, CSR_TIME);
@@ -784,6 +785,14 @@ void processor_t::take_trap(trap_t& t, reg_t epc)
 {
   unsigned max_xlen = isa->get_max_xlen();
 
+  // Turning off MEE
+  if(state.mkeyxor&(1<<8)){
+    //fprintf(stderr,"Turning off\n");
+    mmu->flush_icache();
+    mmu->flush_tlb();
+    state.mkeyxor ^= (1<<8);
+  }
+
   if (debug) {
     std::stringstream s; // first put everything in a string, later send it to output
     s << "core " << std::dec << std::setfill(' ') << std::setw(3) << id
@@ -834,29 +843,54 @@ void processor_t::take_trap(trap_t& t, reg_t epc)
     set_privilege(PRV_S);
   } else if (state.prv <= PRV_S && bit < max_xlen && ((hsdeleg >> bit) & 1)) {
     // Handle the trap in HS-mode
-    set_virt(false);
-    reg_t vector = (state.stvec->read() & 1) && interrupt ? 4 * bit : 0;
-    state.pc = (state.stvec->read() & ~(reg_t)1) + vector;
-    state.scause->write(t.cause());
-    state.sepc->write(epc);
-    state.stval->write(t.get_tval());
-    state.htval->write(t.get_tval2());
-    state.htinst->write(t.get_tinst());
-
-    reg_t s = state.sstatus->read();
-    s = set_field(s, MSTATUS_SPIE, get_field(s, MSTATUS_SIE));
-    s = set_field(s, MSTATUS_SPP, state.prv);
-    s = set_field(s, MSTATUS_SIE, 0);
-    state.sstatus->write(s);
-    if (extension_enabled('H')) {
-      s = state.hstatus->read();
-      if (curr_virt)
-        s = set_field(s, HSTATUS_SPVP, state.prv);
-      s = set_field(s, HSTATUS_SPV, curr_virt);
-      s = set_field(s, HSTATUS_GVA, t.has_gva());
-      state.hstatus->write(s);
-    }
-    set_privilege(PRV_S);
+      if(state.prv == PRV_U){
+        set_virt(false);
+        reg_t vector = (state.mtvec & 1) && interrupt ? 4*bit : 0;
+        state.pc = (state.mtvec & ~(reg_t)1) + vector;
+ 
+        state.scause = t.cause();
+        state.sepc = epc;
+        state.stval = t.get_tval();
+        state.htval = t.get_tval2();
+        state.htinst = t.get_tinst();
+ 
+        state.mcause = 14;
+        state.mtval = 0;
+ 
+        reg_t s = state.mstatus;
+        s = set_field(s, MSTATUS_MPIE, get_field(s, MSTATUS_MIE));
+        s = set_field(s, MSTATUS_MPP, state.prv);
+        // Globaly turning off all Interrupts
+        s = set_field(s, MSTATUS_MIE, 0);
+        s = set_field(s, MSTATUS_MPV, curr_virt);
+        s = set_field(s, MSTATUS_GVA, t.has_gva());
+        set_csr(CSR_MSTATUS, s);
+        set_privilege(PRV_M);
+    } else {
+        set_virt(false);
+        reg_t vector = (state.stvec->read() & 1) && interrupt ? 4 * bit : 0;
+        state.pc = (state.stvec->read() & ~(reg_t)1) + vector;
+        state.scause->write(t.cause());
+        state.sepc->write(epc);
+        state.stval->write(t.get_tval());
+        state.htval->write(t.get_tval2());
+        state.htinst->write(t.get_tinst());
+ 
+        reg_t s = state.sstatus->read();
+        s = set_field(s, MSTATUS_SPIE, get_field(s, MSTATUS_SIE));
+        s = set_field(s, MSTATUS_SPP, state.prv);
+        s = set_field(s, MSTATUS_SIE, 0);
+        state.sstatus->write(s);
+        if (extension_enabled('H')) {
+          s = state.hstatus->read();
+          if (curr_virt)
+            s = set_field(s, HSTATUS_SPVP, state.prv);
+          s = set_field(s, HSTATUS_SPV, curr_virt);
+          s = set_field(s, HSTATUS_GVA, t.has_gva());
+          state.hstatus->write(s);
+        }
+        set_privilege(PRV_S);
+   }
   } else {
     // Handle the trap in M-mode
     set_virt(false);
